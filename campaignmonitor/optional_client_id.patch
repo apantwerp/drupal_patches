@@ -88,7 +88,7 @@ index 0e12cf3..91dddba 100644
            $id,
            $stats['TotalActiveSubscribers'] . ' / ' . $stats['TotalUnsubscribes'],
 diff --git a/lib/campaignmonitor.class.inc b/lib/campaignmonitor.class.inc
-index ebe5f13..09bf9d1 100644
+index ebe5f13..6aa26b7 100644
 --- a/lib/campaignmonitor.class.inc
 +++ b/lib/campaignmonitor.class.inc
 @@ -33,6 +33,7 @@ class CampaignMonitor {
@@ -111,7 +111,7 @@ index ebe5f13..09bf9d1 100644
 +   */
 +  private function createGeneralObj() {
 +    if ($this->libraryLoad(self::FILE_GENERAL)) {
-+      return new CS_REST_General($this->api_key);
++      return new CS_REST_General($this->apiKey);
 +    }
 +    $this->addError(WATCHDOG_ERROR, t('Failed to locate the general library.'));
 +    return FALSE;
