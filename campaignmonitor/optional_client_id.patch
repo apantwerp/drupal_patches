@@ -1,0 +1,264 @@
+diff --git a/campaignmonitor.module b/campaignmonitor.module
+index 4b21e8e..468d426 100644
+--- a/campaignmonitor.module
++++ b/campaignmonitor.module
+@@ -155,10 +155,17 @@ function campaignmonitor_block_info() {
+     $lists = CampaignMonitor::getConnector()->getLists();
+     if ($lists) {
+       foreach ($lists as $list_id => $list) {
++        $list_name = $list['name'];
++
++        // If no Campaign Monitor Client ID is specified, we can have lists of multiple clients and need to distinguish between them.
++        if(empty($account['client_id'])) {
++          $list_name = $list['client'] . ':' . $list_name;
++        }
++
+         // Get local configuration options and check if the list is enabled.
+         if (campaignmonitor_is_list_enabled($list_id)) {
+           $blocks[$list_id] = array(
+-            'info' => t('Subscribe to @list_name (Campaign Monitor)', array('@list_name' => $list['name'])),
++            'info' => t('Campaign Monitor: Subscribe to @list_name', array('@list_name' => $list_name)),
+           );
+         }
+       }
+@@ -180,6 +187,7 @@ function campaignmonitor_block_info() {
+  */
+ function campaignmonitor_block_view($delta) {
+   $block = array();
++  $account = variable_get('campaignmonitor_account', FALSE);
+ 
+   if (CAMPAIGNMONITOR_ARCHIVE_DELTA == $delta) {
+     // Connect to Campaign Monitor and get past campaigns.
+@@ -187,7 +195,10 @@ function campaignmonitor_block_view($delta) {
+     if ($campaigns) {
+       $content = '<ul>';
+       foreach ($campaigns as $campaign) {
+-        $content .= '<li>' . l($campaign['Name'], $campaign['Link']) . ' ' . format_date($campaign['Sent'], 'short') . '</li>';
++        // When no client id is specified, the client names need to mentioned in the list of campaigns.
++        $campaign_name = !$account || empty($account['client_id']) ?  $campaign['Client'] . ':' . $campaign['Name'] : $campaign['Name'];
++
++        $content .= '<li>' . l($campaign_name, $campaign['Link'] ) . ' ' . format_date($campaign['Sent'], 'short') . '</li>';
+       }
+       $content .= '</ul>';
+ 
+@@ -203,7 +214,11 @@ function campaignmonitor_block_view($delta) {
+     // Get lists form Campaign Monitor.
+     $lists = CampaignMonitor::getConnector()->getLists();
+     if ($lists) {
+-      $block['subject'] = t('%name', array('%name' => $lists[$delta]['name']));
++      // When no client id is specified, the client names need to mentioned in the list.
++      $subject = !$account || empty($account['client_id']) ? $lists[$delta]['client'] . ':' .  $lists[$delta]['name'] : $lists[$delta]['name'];
++
++      $block['subject'] = t('%name', array('%name' => $subject));
++
+       if (campaignmonitor_is_list_enabled($delta)) {
+         $block['content'] = drupal_get_form('campaignmonitor_subscribe_form', $delta);
+       }
+diff --git a/includes/campaignmonitor.admin.inc b/includes/campaignmonitor.admin.inc
+index ab6c42b..33b8522 100644
+--- a/includes/campaignmonitor.admin.inc
++++ b/includes/campaignmonitor.admin.inc
+@@ -42,7 +42,7 @@ function campaignmonitor_admin_settings_general() {
+     '#title' => t('Client ID'),
+     '#description' => t('Your Campaign Monitor Client ID. See <a href="https://www.campaignmonitor.com/api/getting-started/#clientid">documentation</a>.'),
+     '#default_value' => isset($account['client_id']) ? $account['client_id'] : '',
+-    '#required' => TRUE,
++    '#required' => FALSE,
+   );
+ 
+   if (!empty($account)) {
+diff --git a/includes/campaignmonitor_lists.admin.inc b/includes/campaignmonitor_lists.admin.inc
+index 0e12cf3..91dddba 100644
+--- a/includes/campaignmonitor_lists.admin.inc
++++ b/includes/campaignmonitor_lists.admin.inc
+@@ -30,6 +30,7 @@ function campaignmonitor_admin_settings_lists() {
+   }
+ 
+   $header = array(
++    array('data' => t('Client ID'), 'field' => 'client', 'sort' => 'asc'),
+     array('data' => t('Title'), 'field' => 'title', 'sort' => 'asc'),
+     array('data' => t('List ID'), 'field' => 'id'),
+     array('data' => t('Subscribed / Unsubscribed'), 'field' => 'status'),
+@@ -64,6 +65,7 @@ function campaignmonitor_admin_settings_lists() {
+       $stats = $cm->getListStats($id);
+       $rows[] = array(
+         'data' => array(
++          $list['client'],
+           $list['name'],
+           $id,
+           $stats['TotalActiveSubscribers'] . ' / ' . $stats['TotalUnsubscribes'],
+diff --git a/lib/campaignmonitor.class.inc b/lib/campaignmonitor.class.inc
+index ebe5f13..dd69555 100644
+--- a/lib/campaignmonitor.class.inc
++++ b/lib/campaignmonitor.class.inc
+@@ -33,6 +33,7 @@ class CampaignMonitor {
+   const FILE_CLIENT = 'csrest_clients.php';
+   const FILE_LIST = 'csrest_lists.php';
+   const FILE_SUBSCRIBERS = 'csrest_subscribers.php';
++  const FILE_GENERAL = 'csrest_general.php';
+ 
+   protected $apiKey;
+   protected $clientId;
+@@ -162,6 +163,20 @@ class CampaignMonitor {
+     return FALSE;
+   }
+ 
++  /*
++   * Create API general object.
++   *
++   * @return CS_REST_General|bool
++   *   The Campaign Monitor general object or FALSE on failure.
++   */
++  private function createGeneralObj() {
++    if ($this->libraryLoad(self::CampaignMonitorGENERAL)) {
++      return new CS_REST_General($this->api_key);
++    }
++    $this->addError(WATCHDOG_ERROR, t('Failed to locate the general library.'));
++    return FALSE;
++  }
++
+   /**
+    * Create API client object.
+    *
+@@ -327,23 +342,51 @@ class CampaignMonitor {
+       else {
+         // Create list object and get the lists, then save the lists in the
+         // local cache.
+-        if ($obj = $this->createClientObj()) {
+-          $result = $obj->get_lists();
+-          if ($result->was_successful()) {
+-            foreach ($result->response as $list) {
+-              $this->lists[$list->ListID] = array(
+-                'name' => $list->Name,
+-              );
++        $clients = array();
++
++        if(!empty($this->client_id)) {
++          $clients[] = $this->client_id;
++        }
++        else {
++          if($gObj = $this->createGeneralObj()) {
++            $result = $gObj->get_clients();
++
++            if ($result->was_successful()) {
++              foreach ($result->response as $client) {
++                $clients[] = $client->ClientID;
++              }
++            }
++            else {
++              $this->addError(WATCHDOG_ERROR, $result->response->Message, $result->http_status_code);
+             }
+-            cache_set('campaignmonitor_lists', $this->lists, 'cache');
+           }
+           else {
+-            $this->addError(WATCHDOG_ERROR, $result->response->Message, $result->http_status_code);
++            return FALSE;
+           }
+         }
+-        else {
+-          return FALSE;
++
++        foreach($clients as $client_id) {
++          if ($obj = $this->createClientObj($client_id)) {
++            $client_result = $obj->get();
++            $result = $obj->get_lists();
++
++            if ($client_result->was_successful() && $result->was_successful()) {
++              $client = $client_result->response;
++
++              foreach ($result->response as $list) {
++                $this->lists[$list->ListID] = array(
++                  'name' => $list->Name,
++                  'client' => $client->BasicDetails->CompanyName,
++                );
++              }
++            }
++            else {
++              $this->addError(WATCHDOG_ERROR, $result->response->Message, $result->http_status_code);
++            }
++          }
+         }
++
++        cache_set('campaignmonitor_lists', $this->lists, 'cache');
+       }
+     }
+ 
+@@ -689,30 +732,61 @@ class CampaignMonitor {
+         $this->campaigns = $cache->data;
+       }
+       else {
+-        if ($obj = $this->createClientObj()) {
+-          $result = $obj->get_campaigns();
+-          if ($result->was_successful()) {
+-            // Build an array for each campaign returned.
+-            foreach ($result->response as $campaign) {
+-              $this->campaigns[$campaign->CampaignID] = array(
+-                'Name' => $campaign->Name,
+-                'Subject' => $campaign->Subject,
+-                'Sent' => strtotime($campaign->SentDate),
+-                'Recipients' => $campaign->TotalRecipients,
+-                'Link' => $campaign->WebVersionURL,
+-              );
++                $clients = array();
++
++        if(!empty($this->client_id)) {
++          $clients[] = $this->client_id;
++        }
++        else {
++          if($gObj = $this->createGeneralObj()) {
++            $result = $gObj->get_clients();
++
++            if ($result->was_successful()) {
++              foreach ($result->response as $client) {
++                $clients[] = $client->ClientID;
++              }
++            }
++            else {
++              $this->addError(WATCHDOG_ERROR, $result->response->Message, $result->http_status_code);
+             }
+-            // Save campaigns in the cache.
+-            cache_set('campaignmonitor_campaigns', $this->campaigns, 'cache', $this->getCacheTimeout());
+           }
+           else {
+-            $this->addError(WATCHDOG_ERROR, $result->response->Message, $result->http_status_code);
+             return FALSE;
+           }
+         }
+-        else {
+-          return FALSE;
++
++        foreach($clients as $client_id) {
++          if ($obj = $this->createClientObj($client_id)) {
++            $client_result = $obj->get();
++            $result = $obj->get_campaigns();
++
++            if ($client_result->was_successful() && $result->was_successful()) {
++              $client = $client_result->response;
++
++              // Build an array for each campaign returned.
++              foreach ($result->response as $campaign) {
++                $this->campaigns[$campaign->CampaignID] = array(
++                  'Name' => $campaign->Name,
++                  'Subject' => $campaign->Subject,
++                  'Sent' => strtotime($campaign->SentDate),
++                  'Recipients' => $campaign->TotalRecipients,
++                  'Link' => $campaign->WebVersionURL,
++                  'Client' => $client->BasicDetails->CompanyName,
++                );
++              }
++            }
++            else {
++              $this->addError(WATCHDOG_ERROR, $result->response->Message, $result->http_status_code);
++              return FALSE;
++            }
++          }
++          else {
++            return FALSE;
++          }
+         }
++
++        // Save campaigns in the cache.
++        cache_set('campaignmonitor_campaigns', $this->campaigns, 'cache', $this->getCacheTimeout());
+       }
+     }
+     return $this->campaigns;
