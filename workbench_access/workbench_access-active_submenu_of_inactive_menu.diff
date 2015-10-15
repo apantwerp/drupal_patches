@@ -1,0 +1,85 @@
+diff --git a/modules/menu.workbench_access.inc b/modules/menu.workbench_access.inc
+index 3c554ed..781a85d 100644
+--- a/modules/menu.workbench_access.inc
++++ b/modules/menu.workbench_access.inc
+@@ -295,18 +295,79 @@ function menu_workbench_access_default_form_alter(&$form, &$form_state, $options
+   // Adjust the parent form.
+   $parent = &$form['menu']['link']['parent'];
+   $current = $parent['#options'];
++  $first = true;
++
++  // Collect all names of menus from the accessible menu links
++  $valid_menus = array();
++  $parent_links = array();
++  $mlids = array();
++
++  foreach($options as $key => $value) {
++
++    if(!preg_match('/^menu/', $key)) {
++      $mlids[] = $key;
++    }
++    else {
++      if(!in_array($key, $valid_menus)) {
++        $valid_menus[] = $key;
++      }
++    }
++  }
++
++  // Select all parent menu link data for the mlids and add to parent_links array
++  $results = db_query("SELECT * from {menu_links} WHERE mlid IN (:mlids)", array(':mlids'=> $mlids));
++  foreach($results as $menu_link) {
++    for($i=1; $i<10; $i++) {
++      $pid = "p$i";
++      $parent_id = $menu_link->$pid;
++
++      if(!in_array($parent_id, $parent_links)) {
++        $parent_links[] = $parent_id;
++      }
++
++      if($parent_id == 0) break;
++    }
++
++    if(!in_array($menu_link->menu_name, $valid_menus)) {
++      $valid_menus[] = $menu_link->menu_name;
++    }
++  }
+ 
+   foreach ($parent['#options'] as $key => $value) {
+     $ids = explode(':', $key);
+     $menu = $ids[0];
+     $plid = $ids[1];
++
++    // Remove the menu's that haven't got any items accessible for the user
++    if(!in_array($menu, $valid_menus)) {
++      unset($parent['#options'][$key]);
++      continue;
++    }
++
+     // Unset if the user does not not have access to this item and the item
+     // is not the current parent.
+     if (!isset($options[$plid]) && !isset($options[$menu]) && (!$form['menu']['enabled']['#default_value'] || $key != $parent['#default_value'])) {
+-      unset($parent['#options'][$key]);
++      if($plid > 0 && !in_array($plid, $parent_links)) {
++        unset($parent['#options'][$key]);
++      }
++      else {
++        $parent['#disabled_options'][] = $key;
++      }
++    }
++    else {
++      if($first) {
++        $first = false;
++        $parent['#default_value'] = $key;
++      }
+     }
+   }
+ 
++  // Make sure the already set menu link is in the right menu
++  $node = $form_state['node'];
++  if(!empty($node->menu)) {
++    $parent['#default_value'] = $node->menu['menu_name' ] . ':' . $node->menu['plid'];
++  }
++
+   // Assume that all new content will be in the menu.
+   if (empty($form['#node']->nid)) {
+     $form['menu']['enabled']['#default_value'] = 1;
